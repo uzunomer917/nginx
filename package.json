@@ -1,0 +1,28 @@
+{
+  "name": "cdn-proxy-pages",
+  "version": "1.0.0",
+  "description": "High-performance CDN proxy using Cloudflare Pages - CloudFront/Fastly alternative",
+  "main": "functions/_middleware.js",
+  "scripts": {
+    "dev": "wrangler pages dev public --compatibility-date=2024-11-01",
+    "deploy": "wrangler pages deploy public",
+    "build": "echo 'No build needed for CDN proxy'",
+    "preview": "wrangler pages dev public"
+  },
+  "keywords": [
+    "cdn",
+    "cloudflare",
+    "pages",
+    "proxy",
+    "cache",
+    "hls",
+    "streaming",
+    "cloudflare-pages"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}
+
