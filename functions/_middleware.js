@@ -4,7 +4,7 @@
  * HLS streaming için optimize edilmiş (.jpg dosyaları)
  */
 
-const ORIGIN_URL = 'https://w0rk3rsb4ckd00r.global.ssl.fastly.net';
+const ORIGIN_URL = 'https://webr00t.global.ssl.fastly.net';
 
 // Cache süresi ayarları (saniye cinsinden)
 const CACHE_DURATION = {
