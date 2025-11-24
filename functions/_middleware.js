@@ -1,16 +1,16 @@
 /**
- * Cloudflare Pages Functions - HLS CDN Proxy (v2 Stable)
- * Fixes: CORS Preflight, Stream Handling, Error Headers
+ * Cloudflare Pages Functions - HLS CDN Proxy (v4 Production Ready)
+ * Optimized for: 50k+ Concurrent Users, Tiered Cache & Query String Ignoring
  */
 
 const ORIGIN_URL = 'https://webr00t.global.ssl.fastly.net';
+const STABLE_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-// CORS Header'ları standartlaştırıldı
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Range, User-Agent, X-Requested-With',
-  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, ETag, Last-Modified',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': '*',
   'Access-Control-Max-Age': '86400',
 };
 
@@ -18,51 +18,44 @@ export async function onRequest(context) {
   const { request, waitUntil } = context;
   const url = new URL(request.url);
 
-  // 1. OPTIONS İsteğini Karşıla (CORS Preflight)
-  // Bu olmazsa tarayıcı GET isteğini hiç atmaz.
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: corsHeaders
-    });
-  }
+  // 1. Preflight & Method Checks
+  if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
+  if (!['GET', 'HEAD'].includes(request.method)) return new Response('Method Not Allowed', { status: 405, headers: corsHeaders });
 
-  // 2. Sadece GET ve HEAD'e izin ver
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    return new Response('Method Not Allowed', { 
-      status: 405, 
-      headers: corsHeaders 
-    });
-  }
-
-  // 3. Health Check
-  if (url.pathname === '/health' || url.pathname === '/') {
-    return new Response('OK', { 
-      status: 200, 
-      headers: corsHeaders 
-    });
-  }
-
+  // 2. Strateji Belirleme
+  const isPlaylist = url.pathname.endsWith('.m3u8');
+  // Playlist için 2 saniye, Segmentler (.ts, .jpg, .key) için 1 YIL cache
+  const cacheTtl = isPlaylist ? 2 : 31536000;
+  
   try {
-    // Cache API
     const cache = caches.default;
-    
-    // Range varsa cache key'den ayırıyoruz ki ana dosyayı cache'leyebilelim.
-    // Ancak Cloudflare free planda range cache yönetimi zordur, bu yüzden
-    // HLS segmentleri küçükse range'i cache key'e katmak daha güvenlidir.
-    // Şimdilik en basit ve çalışır haliyle URL'i baz alıyoruz.
-    const cacheKey = new Request(url.toString(), request);
 
-    // 4. Cache Kontrolü
+    // --- KRİTİK GÜNCELLEME: CACHE KEY NORMALIZATION ---
+    // Kullanıcılar ?token=xyz ile gelse bile, biz cache'e sadece dosya adıyla bakacağız.
+    // Bu sayede 50k farklı token olsa bile hepsi AYNI cache dosyasından beslenir.
+    const cacheKeyUrl = new URL(url.toString());
+    
+    // .ts ve .jpg için query string'i cache anahtarından sil (Origin'e giderken kalacak!)
+    if (!isPlaylist) {
+        cacheKeyUrl.search = ''; 
+    }
+    // Not: Playlistlerde (.m3u8) token bazen içerik değiştirir, o yüzden onlarda silmiyoruz.
+    // Eğer m3u8'ler de kişiye özel değilse, yukarıdaki if'i kaldır, hepsinde sil.
+
+    const cacheKey = new Request(cacheKeyUrl.toString(), {
+        method: 'GET',
+        headers: {} // Header varyasyonlarını yoksay
+    });
+
+    // 3. Cache Kontrolü
     let response = await cache.match(cacheKey);
 
     if (response) {
-      // Cache HIT olsa bile CORS headerlarını tazelemek gerekebilir
       const newHeaders = new Headers(response.headers);
       newHeaders.set('CF-Cache-Status', 'HIT');
-      // CORS headerlarını üzerine yaz
+      newHeaders.set('X-Simulated-Users', '50k-Ready'); // Debug imzası
       Object.keys(corsHeaders).forEach(key => newHeaders.set(key, corsHeaders[key]));
-
+      
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
@@ -70,90 +63,68 @@ export async function onRequest(context) {
       });
     }
 
-    // 5. Origin Fetch (Headers Hazırlığı)
+    // 4. Origin Fetch (Origin'e Tokenlı URL ile git, ama Chrome gibi görün)
     const originHeaders = new Headers();
+    originHeaders.set('User-Agent', STABLE_USER_AGENT);
+    originHeaders.set('Referer', ORIGIN_URL);
+    originHeaders.set('Connection', 'keep-alive');
     
-    // Kritik headerları kopyala
-    const allowedForwardHeaders = ['range', 'user-agent', 'accept', 'accept-encoding'];
-    allowedForwardHeaders.forEach(h => {
-      const val = request.headers.get(h);
-      if (val) originHeaders.set(h, val);
-    });
+    // Range desteği (Seek için)
+    if (request.headers.get('range')) {
+        originHeaders.set('Range', request.headers.get('range'));
+    }
 
-    // Origin'e istek
     const originResponse = await fetch(`${ORIGIN_URL}${url.pathname}${url.search}`, {
       method: request.method,
       headers: originHeaders,
       cf: {
-        cacheTtl: 31536000, // 1 Yıl Edge Cache
+        // Tiered Cache bu ayarla coşar
+        cacheTtl: cacheTtl,
         cacheEverything: true
       }
     });
 
-    // 6. Response Header Hazırlığı
+    // 5. Response Hazırlığı
     const responseHeaders = new Headers(originResponse.headers);
-
-    // Origin'den gelen gereksizleri sil
-    ['set-cookie', 'via', 'server', 'x-powered-by'].forEach(h => responseHeaders.delete(h));
-
-    // CORS ekle
-    Object.keys(corsHeaders).forEach(key => responseHeaders.set(key, corsHeaders[key]));
-
-    // Cache Status
-    responseHeaders.set('CF-Cache-Status', 'MISS');
-
-    // Eğer Origin hata döndüyse (404, 500 vs) direkt dön (Cache'leme)
-    if (!originResponse.ok) {
-      return new Response(originResponse.body, {
-        status: originResponse.status,
-        statusText: originResponse.statusText,
-        headers: responseHeaders
-      });
-    }
-
-    // 7. Body Handling (Teeing) - Kilitlenmeyi önlemek için
-    const body = originResponse.body;
     
-    // Eğer body yoksa (HEAD request veya 304) direkt dön
-    if (!body) {
-      return new Response(null, {
-        status: originResponse.status,
-        headers: responseHeaders
-      });
+    // Gereksiz header temizliği
+    ['set-cookie', 'via', 'server', 'x-powered-by', 'cf-cache-status', 'cf-ray', 'age'].forEach(h => responseHeaders.delete(h));
+
+    // Browser Cache Ayarları
+    Object.keys(corsHeaders).forEach(key => responseHeaders.set(key, corsHeaders[key]));
+    responseHeaders.set('Cache-Control', `public, max-age=${cacheTtl}${isPlaylist ? ', must-revalidate' : ', immutable'}`);
+    
+    if (!originResponse.ok) {
+      // Hata alan origin cevabını cacheleme, direkt dön
+      return new Response(originResponse.body, { status: originResponse.status, headers: responseHeaders });
     }
 
-    // Stream'i ikiye ayır: Biri kullanıcıya, biri cache'e
+    // 6. Akıllı Yazma (Query String'siz Key'e Yazıyoruz!)
+    const body = originResponse.body;
+    if (!body) return new Response(null, { headers: responseHeaders });
+
     const [clientStream, cacheStream] = body.tee();
 
-    // Cache'e kaydetme işlemini arka planda yap (waitUntil)
     waitUntil((async () => {
-      try {
-        // Range requestleri (206) bazen cache.put ile sorun çıkarabilir.
-        // Sadece tam içerikleri (200) cache'lemek daha güvenlidir.
-        if (originResponse.status === 200) {
-          await cache.put(cacheKey, new Response(cacheStream, {
-            status: originResponse.status,
-            headers: responseHeaders
-          }));
-        }
-      } catch (e) {
-        // Cache hatası olursa client etkilenmesin, logla geç
-        console.error('Cache Put Error:', e);
+      if (originResponse.status === 200) {
+        // Cache'e yazarken temiz headerlarla yaz
+        const cacheHeaders = new Headers(responseHeaders);
+        // Cache'te tutarken süreyi header'a da işle
+        cacheHeaders.set('Cache-Control', `public, max-age=${cacheTtl}`);
+        
+        await cache.put(cacheKey, new Response(cacheStream, {
+          status: originResponse.status,
+          headers: cacheHeaders
+        }));
       }
     })());
 
-    // Kullanıcıya yanıt dön
     return new Response(clientStream, {
       status: originResponse.status,
-      statusText: originResponse.statusText,
       headers: responseHeaders
     });
 
   } catch (err) {
-    // Global Hata Yakalama
-    return new Response(`CDN Proxy Error: ${err.message}`, { 
-      status: 500,
-      headers: corsHeaders // Hata durumunda bile CORS dönmek şart!
-    });
+    return new Response(JSON.stringify({ error: 'Proxy Error', detail: err.message }), { status: 500, headers: corsHeaders });
   }
 }
